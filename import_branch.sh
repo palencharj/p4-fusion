@@ -1,61 +1,101 @@
 #!/bin/bash
 
 # Usage: ./import_branch.sh <Target_Repo_Path> <Source_Repo_Path> <New_Branch_Name>
-# Example: ./import_branch.sh ~/FSSDK_Repos/Main ~/FSSDK_Repos/Old "legacy-v1"
+# Example: ./import_branch.sh ~/Repos/ProjectA ~/Repos/ProjectB "legacy_branch"
 
-TARGET_REPO=$1
-SOURCE_REPO=$2
+TARGET_INPUT=$1
+SOURCE_INPUT=$2
 NEW_BRANCH_NAME=$3
 
-# 1. Validation
-if [ -z "$TARGET_REPO" ] || [ -z "$SOURCE_REPO" ] || [ -z "$NEW_BRANCH_NAME" ]; then
-    echo "Usage: ./import_branch.sh <Target_Repo_Path> <Source_Repo_Path> <New_Branch_Name>"
+# --- 1. Validation & Setup ---
+
+if [ -z "$TARGET_INPUT" ] || [ -z "$SOURCE_INPUT" ] || [ -z "$NEW_BRANCH_NAME" ]; then
+    echo "Usage: $0 <Target_Repo_Path> <Source_Repo_Path> <New_Branch_Name>"
     exit 1
 fi
 
-TARGET_REPO=$(realpath "$TARGET_REPO")
-SOURCE_REPO=$(realpath "$SOURCE_REPO")
+# Helper to fix the "Parent Folder" mistake
+# If user passes ".../Foundation" but repo is ".../Foundation/FSSDKFoundation", we fix it.
+fix_path() {
+    local path=$1
+    if [ -d "$path" ]; then
+        # If the path itself is not a repo (no objects folder), check inside
+        if [ ! -d "$path/objects" ] && [ ! -d "$path/.git" ]; then
+            # Look for a subdirectory that looks like a repo
+            local sub=$(find "$path" -maxdepth 2 -type d -name "objects" | head -n 1)
+            if [ ! -z "$sub" ]; then
+                echo "$(dirname "$sub")"
+                return
+            fi
+        fi
+    fi
+    echo "$path"
+}
+
+TARGET_REPO=$(fix_path "$TARGET_INPUT")
+SOURCE_REPO=$(fix_path "$SOURCE_INPUT")
 
 echo "--------------------------------------------------------"
-echo "Target Repo: $TARGET_REPO"
-echo "Source Repo: $SOURCE_REPO"
-echo "New Branch:  $NEW_BRANCH_NAME"
+echo "Target:     $TARGET_REPO"
+echo "Source:     $SOURCE_REPO"
+echo "New Branch: $NEW_BRANCH_NAME"
 echo "--------------------------------------------------------"
 
-# 2. Navigate to Target
-cd "$TARGET_REPO" || { echo "Target repo not found"; exit 1; }
+# Create a temporary workspace
+TEMP_DIR=$(mktemp -d)
+echo "[INFO] Created temp workspace: $TEMP_DIR"
 
-# 3. Add Source as a temporary remote
-#    We use a random string for remote name to avoid conflicts
-TEMP_REMOTE="temp-import-$(date +%s)"
+# --- 2. Clone Target Repo ---
 
-echo "[INFO] Adding local remote..."
-git remote add "$TEMP_REMOTE" "$SOURCE_REPO"
+echo "[INFO] Cloning Target Repo to temp..."
+git clone "$TARGET_REPO" "$TEMP_DIR/work_repo" > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+    echo "[ERROR] Failed to clone Target. Is the path correct?"
+    rm -rf "$TEMP_DIR"
+    exit 1
+fi
 
-# 4. Fetch the objects
-echo "[INFO] Fetching history from source..."
-git fetch "$TEMP_REMOTE"
+cd "$TEMP_DIR/work_repo" || exit 1
 
-# 5. Create the branch
-#    We assume the source repo uses 'master'. If it uses 'main', change 'master' below.
-echo "[INFO] Creating branch '$NEW_BRANCH_NAME'..."
-if git show-ref --quiet "refs/remotes/$TEMP_REMOTE/master"; then
-    git checkout -b "$NEW_BRANCH_NAME" "$TEMP_REMOTE/master"
-elif git show-ref --quiet "refs/remotes/$TEMP_REMOTE/main"; then
-    git checkout -b "$NEW_BRANCH_NAME" "$TEMP_REMOTE/main"
+# --- 3. Pull in Source History ---
+
+echo "[INFO] Adding Source Repo as remote..."
+git remote add source_temp "$SOURCE_REPO"
+
+echo "[INFO] Fetching source history..."
+git fetch source_temp > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+    echo "[ERROR] Failed to fetch from Source. Is the path correct?"
+    rm -rf "$TEMP_DIR"
+    exit 1
+fi
+
+# --- 4. Create the New Branch ---
+
+echo "[INFO] Creating new branch '$NEW_BRANCH_NAME'..."
+# Try to find 'master' or 'main' in the source
+if git rev-parse --verify source_temp/master > /dev/null 2>&1; then
+    git checkout -b "$NEW_BRANCH_NAME" source_temp/master
+elif git rev-parse --verify source_temp/main > /dev/null 2>&1; then
+    git checkout -b "$NEW_BRANCH_NAME" source_temp/main
 else
-    echo "[ERROR] Could not find 'master' or 'main' in source repo."
-    git remote remove "$TEMP_REMOTE"
+    echo "[ERROR] Could not find 'master' or 'main' branch in Source repo."
+    rm -rf "$TEMP_DIR"
     exit 1
 fi
 
-# 6. Cleanup
-echo "[INFO] Cleaning up remote..."
-git remote remove "$TEMP_REMOTE"
+# --- 5. Push Back to Original Target ---
 
-# 7. Switch back to original main branch (optional, but polite)
-git checkout master 2>/dev/null || git checkout main 2>/dev/null
+echo "[INFO] Pushing new branch back to Target Repo..."
+git push origin "$NEW_BRANCH_NAME"
 
-echo "--------------------------------------------------------"
-echo "[SUCCESS] Branch '$NEW_BRANCH_NAME' created in $TARGET_REPO"
-echo "Run 'git checkout $NEW_BRANCH_NAME' to see the files."
+if [ $? -eq 0 ]; then
+    echo "--------------------------------------------------------"
+    echo "[SUCCESS] Done! Branch '$NEW_BRANCH_NAME' is now in:"
+    echo "$TARGET_REPO"
+else
+    echo "[ERROR] Failed to push to target."
+fi
+
+# --- 6. Cleanup ---
+rm -rf "$TEMP_DIR"
