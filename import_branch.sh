@@ -1,33 +1,30 @@
 #!/bin/bash
 
-# Usage: ./import_branch.sh <Target_Repo_Path> <Source_Repo_Path> <New_Branch_Name>
-# Example: ./import_branch.sh ~/Repos/ProjectA ~/Repos/ProjectB "legacy_branch"
+# ==============================================================================
+#  Import Full Repo (Main + All Branches)
+# ==============================================================================
+# Usage: ./import_repo_full.sh <Target_Repo> <Source_Repo> <New_Name_For_Main>
+# Example: ./import_repo_full.sh ~/Foundation ~/FSSDK27 FSSDK27
 
 TARGET_INPUT=$1
 SOURCE_INPUT=$2
-NEW_BRANCH_NAME=$3
+NEW_MAIN_NAME=$3
 
 # --- 1. Validation & Setup ---
 
-if [ -z "$TARGET_INPUT" ] || [ -z "$SOURCE_INPUT" ] || [ -z "$NEW_BRANCH_NAME" ]; then
-    echo "Usage: $0 <Target_Repo_Path> <Source_Repo_Path> <New_Branch_Name>"
+if [ -z "$TARGET_INPUT" ] || [ -z "$SOURCE_INPUT" ] || [ -z "$NEW_MAIN_NAME" ]; then
+    echo "Usage: $0 <Target_Repo> <Source_Repo> <New_Name_For_Main>"
     exit 1
 fi
 
-# Helper to fix the "Parent Folder" mistake
-# If user passes ".../Foundation" but repo is ".../Foundation/FSSDKFoundation", we fix it.
 fix_path() {
     local path=$1
+    path=$(realpath -m "$path")
     if [ -d "$path" ]; then
-        # If the path itself is not a repo (no objects folder), check inside
-        if [ ! -d "$path/objects" ] && [ ! -d "$path/.git" ]; then
-            # Look for a subdirectory that looks like a repo
-            local sub=$(find "$path" -maxdepth 2 -type d -name "objects" | head -n 1)
-            if [ ! -z "$sub" ]; then
-                echo "$(dirname "$sub")"
-                return
-            fi
-        fi
+        if [ -d "$path/objects" ] && [ -d "$path/refs" ]; then echo "$path"; return; fi
+        if [ -d "$path/.git" ]; then echo "$path"; return; fi
+        local sub=$(find "$path" -maxdepth 2 -type d -name "objects" 2>/dev/null | head -n 1)
+        if [ ! -z "$sub" ]; then dirname "$sub"; return; fi
     fi
     echo "$path"
 }
@@ -35,10 +32,34 @@ fix_path() {
 TARGET_REPO=$(fix_path "$TARGET_INPUT")
 SOURCE_REPO=$(fix_path "$SOURCE_INPUT")
 
+# --- SMART NAMING LOGIC ---
+
+# 1. We start by wanting the prefix to look like the new main name (e.g. "FSSDK27")
+PREFIX_BASE="$NEW_MAIN_NAME"
+
+# 2. Check for Git Directory/File Collision
+#    Git prevents having a branch "FSSDK27" and a folder "FSSDK27/" simultaneously.
+#    Since you explicitly requested the main branch be "FSSDK27", we must 
+#    adjust the sub-branches to avoid the folder conflict.
+
+# We default to using a slash (folder) separator: FSSDK27/branch
+SEPARATOR="/"
+
+# But if the Main Name is exactly the Prefix Base, we switch to a hyphen separator
+# to avoid the Git error.
+# Result: Main -> "FSSDK27", Sub -> "FSSDK27-27.0.0"
+if [ "$NEW_MAIN_NAME" == "$PREFIX_BASE" ]; then
+    SEPARATOR="-"
+fi
+
+# 3. Construct the final Prefix
+REPO_PREFIX="${PREFIX_BASE}${SEPARATOR}"
+
 echo "--------------------------------------------------------"
-echo "Target:     $TARGET_REPO"
-echo "Source:     $SOURCE_REPO"
-echo "New Branch: $NEW_BRANCH_NAME"
+echo "Target Repo:     $TARGET_REPO"
+echo "Source Repo:     $SOURCE_REPO"
+echo "Target Main:     $NEW_MAIN_NAME (Preserved as requested)"
+echo "Sub-Branch fmt:  ${REPO_PREFIX}BranchName"
 echo "--------------------------------------------------------"
 
 # Create a temporary workspace
@@ -47,55 +68,90 @@ echo "[INFO] Created temp workspace: $TEMP_DIR"
 
 # --- 2. Clone Target Repo ---
 
-echo "[INFO] Cloning Target Repo to temp..."
+echo "[INFO] Cloning Target Repo..."
 git clone "$TARGET_REPO" "$TEMP_DIR/work_repo" > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-    echo "[ERROR] Failed to clone Target. Is the path correct?"
+    echo "[ERROR] Failed to clone Target."
     rm -rf "$TEMP_DIR"
     exit 1
 fi
 
 cd "$TEMP_DIR/work_repo" || exit 1
 
-# --- 3. Pull in Source History ---
+# --- 3. Connect Source Repo ---
 
-echo "[INFO] Adding Source Repo as remote..."
+echo "[INFO] Adding Source Remote..."
 git remote add source_temp "$SOURCE_REPO"
-
-echo "[INFO] Fetching source history..."
 git fetch source_temp > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-    echo "[ERROR] Failed to fetch from Source. Is the path correct?"
-    rm -rf "$TEMP_DIR"
-    exit 1
-fi
 
-# --- 4. Create the New Branch ---
+# --- 4. Handle The Main Branch ---
 
-echo "[INFO] Creating new branch '$NEW_BRANCH_NAME'..."
-# Try to find 'master' or 'main' in the source
-if git rev-parse --verify source_temp/master > /dev/null 2>&1; then
-    git checkout -b "$NEW_BRANCH_NAME" source_temp/master
-elif git rev-parse --verify source_temp/main > /dev/null 2>&1; then
-    git checkout -b "$NEW_BRANCH_NAME" source_temp/main
+echo "[INFO] Processing Main Branch..."
+SOURCE_MAIN=""
+# Detect source main/master
+if git rev-parse --verify source_temp/main > /dev/null 2>&1; then SOURCE_MAIN="main";
+elif git rev-parse --verify source_temp/master > /dev/null 2>&1; then SOURCE_MAIN="master"; fi
+
+if [ -n "$SOURCE_MAIN" ]; then
+    echo "       Source ($SOURCE_MAIN) -> Target ($NEW_MAIN_NAME)"
+    
+    # SAFETY: Ensure we aren't accidentally trying to overwrite the Target's existing HEAD 
+    # if the user passed "main" or "master" as the New Name.
+    EXISTING_HEAD=$(git symbolic-ref --short HEAD)
+    if [ "$NEW_MAIN_NAME" == "$EXISTING_HEAD" ]; then
+        echo "       [WARN] You are overwriting the Target's existing '$EXISTING_HEAD' branch."
+        echo "              This will merge histories."
+    fi
+
+    # Checkout source main as the new name
+    git checkout -b "$NEW_MAIN_NAME" "source_temp/$SOURCE_MAIN" > /dev/null 2>&1
+    
+    # Push to origin
+    git push origin "$NEW_MAIN_NAME" > /dev/null 2>&1
+    echo "       [OK] Pushed $NEW_MAIN_NAME"
 else
-    echo "[ERROR] Could not find 'master' or 'main' branch in Source repo."
-    rm -rf "$TEMP_DIR"
-    exit 1
+    echo "       [WARN] Could not find main/master in source."
 fi
 
-# --- 5. Push Back to Original Target ---
+# --- 5. Handle All Other Branches ---
 
-echo "[INFO] Pushing new branch back to Target Repo..."
-git push origin "$NEW_BRANCH_NAME"
+echo "[INFO] Processing Sub-Branches..."
 
-if [ $? -eq 0 ]; then
-    echo "--------------------------------------------------------"
-    echo "[SUCCESS] Done! Branch '$NEW_BRANCH_NAME' is now in:"
-    echo "$TARGET_REPO"
-else
-    echo "[ERROR] Failed to push to target."
-fi
+# List remote branches, excluding HEAD and the main branch we just imported
+BRANCHES=$(git branch -r | grep "source_temp/" | grep -v "HEAD" | grep -v "source_temp/$SOURCE_MAIN$")
+
+for REMOTE_REF in $BRANCHES; do
+    # Raw name: "27.0.0"
+    RAW_NAME=${REMOTE_REF#source_temp/}
+    RAW_NAME=$(echo "$RAW_NAME" | xargs)
+
+    # Skip if it's 'master' but we already handled 'main' (or vice versa) to avoid dupes
+    if [[ "$SOURCE_MAIN" == "main" && "$RAW_NAME" == "master" ]]; then continue; fi
+    if [[ "$SOURCE_MAIN" == "master" && "$RAW_NAME" == "main" ]]; then continue; fi
+
+    # Apply Prefix: "FSSDK27-27.0.0" (using hyphen to allow main branch "FSSDK27")
+    TARGET_NAME="${REPO_PREFIX}${RAW_NAME}"
+
+    echo "       Importing: $RAW_NAME -> $TARGET_NAME"
+    
+    # Check if exists
+    if git ls-remote --heads origin "$TARGET_NAME" | grep -q "$TARGET_NAME"; then
+        echo "       [SKIP] Branch '$TARGET_NAME' already exists."
+        continue
+    fi
+
+    # Checkout and Push
+    git checkout -b "$TARGET_NAME" "$REMOTE_REF" > /dev/null 2>&1
+    git push origin "$TARGET_NAME" > /dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
+        echo "       [OK] Pushed $TARGET_NAME"
+    else
+        echo "       [FAIL] Error pushing $TARGET_NAME"
+    fi
+done
 
 # --- 6. Cleanup ---
+echo "--------------------------------------------------------"
+echo "[SUCCESS] Import complete."
 rm -rf "$TEMP_DIR"
