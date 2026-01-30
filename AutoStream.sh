@@ -9,6 +9,10 @@ SEARCH_ROOT="//Components/FSSDK"
 GIT_OUTPUT_ROOT=$(eval echo ~/FSSDK_Repos)
 P4_FUSION_BIN="./build/p4-fusion/p4-fusion"
 
+# Timer variables
+GLOBAL_START=$SECONDS
+STATS_LOG=()
+
 # ==============================================================================
 #  EXECUTION
 # ==============================================================================
@@ -53,6 +57,9 @@ echo "[INFO] Found $COUNT Mainline streams."
 
 # 3. Processing Loop
 for MAIN_STREAM in $MAINLINES; do
+    # Start per-stream timer
+    STREAM_START=$SECONDS
+
     echo "----------------------------------------------------------------"
     echo "[INFO] Processing Family for: $MAIN_STREAM"
 
@@ -107,7 +114,6 @@ EOF
     set -x
 
     # Run p4-fusion
-    # We place BRANCH_ARGS immediately after PATH to ensure context is clear
     "$P4_FUSION_BIN" \
         --path "$COMMON_ROOT/..." \
         "${BRANCH_ARGS[@]}" \
@@ -128,7 +134,16 @@ EOF
     # Cleanup
     p4 client -d "$CLIENT_NAME" > /dev/null 2>&1
 
+    # Store stats
+    DURATION=$((SECONDS - STREAM_START))
+    STATS_LOG+=("$SAFE_NAME: ${DURATION}s")
+
 done
 
 echo "----------------------------------------------------------------"
 echo "[SUCCESS] All migrations complete."
+echo "----------------------------------------------------------------"
+echo "INDIVIDUAL TIMES:"
+for stat in "${STATS_LOG[@]}"; do echo "  - $stat"; done
+echo "TOTAL RUNTIME: $(( (SECONDS - GLOBAL_START) / 60 ))m $(( (SECONDS - GLOBAL_START) % 60 ))s"
+echo "----------------------------------------------------------------"
