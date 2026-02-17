@@ -3,11 +3,21 @@
 # ==============================================================================
 #  CONFIGURATION
 # ==============================================================================
+
 P4USER="jpalenchar"
 P4PORT="10.2.2.71:61234"
-SEARCH_ROOT="//Components/FSSDK"
-GIT_OUTPUT_ROOT=$(eval echo ~/FSSDK_Repos)
 P4_FUSION_BIN="./build/p4-fusion/p4-fusion"
+
+# SEARCH_ROOTS and GIT_OUTPUT_ROOTS must match by index
+SEARCH_ROOTS=(
+  "//Components/CommandsSearcher"
+  "//Components/AnotherProject"
+)
+
+GIT_OUTPUT_ROOTS=(
+  "$(eval echo ~/CommandsSearcher_Repos)"
+  "$(eval echo ~/AnotherProject_Repos)"
+)
 
 # Timer variables
 GLOBAL_START=$SECONDS
@@ -32,75 +42,93 @@ fi
 # Turn off debug for the discovery phase to reduce noise
 set +x
 
-# 2. Discovery Phase
-echo "[INFO] Mapping all streams under $SEARCH_ROOT..."
-RAW_OUTPUT=$(p4 streams "$SEARCH_ROOT/..." | tr -d '\r')
-
-if [ -z "$RAW_OUTPUT" ]; then
-    echo "[ERROR] No streams found under $SEARCH_ROOT."
+# Validate arrays
+if [ ${#SEARCH_ROOTS[@]} -ne ${#GIT_OUTPUT_ROOTS[@]} ]; then
+    echo "[ERROR] SEARCH_ROOTS and GIT_OUTPUT_ROOTS must have the same number of elements."
+    echo "        SEARCH_ROOTS=${#SEARCH_ROOTS[@]} items, GIT_OUTPUT_ROOTS=${#GIT_OUTPUT_ROOTS[@]} items"
     exit 1
 fi
 
-# Filter for relevant streams
-RELEVANT_STREAMS=$(echo "$RAW_OUTPUT" | awk '$3 ~ /^(mainline|development|release)$/ {print $2, $3}')
+# Outer loop: iterate pairs by index
+for i in "${!SEARCH_ROOTS[@]}"; do
+    SEARCH_ROOT="${SEARCH_ROOTS[$i]}"
+    GIT_OUTPUT_ROOT="${GIT_OUTPUT_ROOTS[$i]}"
 
-# Extract Mainlines
-MAINLINES=$(echo "$RELEVANT_STREAMS" | awk '$2 == "mainline" {print $1}')
-COUNT=$(echo "$MAINLINES" | wc -w)
+    echo "==============================================================="
+    echo "[INFO] Processing Root Pair Index $i"
+    echo "[INFO] SEARCH_ROOT:     $SEARCH_ROOT"
+    echo "[INFO] GIT_OUTPUT_ROOT: $GIT_OUTPUT_ROOT"
+    echo "==============================================================="
 
-if [ "$COUNT" -eq 0 ]; then
-    echo "[ERROR] No mainline streams found."
-    exit 1
-fi
+    # 2. Discovery Phase
+    echo "[INFO] Mapping all streams under $SEARCH_ROOT..."
+    RAW_OUTPUT=$(p4 streams "$SEARCH_ROOT/..." | tr -d '\r')
 
-echo "[INFO] Found $COUNT Mainline streams."
-
-# 3. Processing Loop
-for MAIN_STREAM in $MAINLINES; do
-    # Start per-stream timer
-    STREAM_START=$SECONDS
-
-    echo "----------------------------------------------------------------"
-    echo "[INFO] Processing Family for: $MAIN_STREAM"
-
-    COMMON_ROOT=$(dirname "$MAIN_STREAM")
-    FAMILY_STREAMS=$(echo "$RELEVANT_STREAMS" | grep "^$COMMON_ROOT/" | awk '{print $1}')
-
-    REL_PATH=${COMMON_ROOT#//}
-    SAFE_NAME=${REL_PATH//\//-}
-    CLIENT_NAME="p4fusion-${SAFE_NAME}-${USER}"
-    REPO_PATH="${GIT_OUTPUT_ROOT}/${REL_PATH}"
-
-    echo "[INFO] Git Repo:    $REPO_PATH"
-
-    # Cleanup Old Repo
-    p4 client -d "$CLIENT_NAME" > /dev/null 2>&1
-    if [ -d "$REPO_PATH" ]; then
-        rm -rf "$REPO_PATH"
+    if [ -z "$RAW_OUTPUT" ]; then
+        echo "[WARNING] No streams found under $SEARCH_ROOT. Skipping."
+        continue
     fi
-    mkdir -p "$REPO_PATH"
 
-    # Construct Branch Arguments
-    BRANCH_ARGS=()
-    
-    echo "[INFO] Branches found:"
-    for STREAM in $FAMILY_STREAMS; do
-        REL_NAME=${STREAM#$COMMON_ROOT/}
-        
-        if [ "$STREAM" == "$MAIN_STREAM" ]; then
-            ALIAS="main"
-        else
-            ALIAS=${REL_NAME//\//-}
+    # Filter for relevant streams
+    RELEVANT_STREAMS=$(echo "$RAW_OUTPUT" | awk '$3 ~ /^(mainline|development|release)$/ {print $2, $3}')
+
+    # Extract Mainlines
+    MAINLINES=$(echo "$RELEVANT_STREAMS" | awk '$2 == "mainline" {print $1}')
+    COUNT=$(echo "$MAINLINES" | wc -w)
+
+    if [ "$COUNT" -eq 0 ]; then
+        echo "[WARNING] No mainline streams found under $SEARCH_ROOT. Skipping."
+        continue
+    fi
+
+    echo "[INFO] Found $COUNT Mainline streams."
+
+    # 3. Processing Loop
+    for MAIN_STREAM in $MAINLINES; do
+        # Start per-stream timer
+        STREAM_START=$SECONDS
+
+        echo "----------------------------------------------------------------"
+        echo "[INFO] Processing Family for: $MAIN_STREAM"
+
+        COMMON_ROOT=$(dirname "$MAIN_STREAM")
+        FAMILY_STREAMS=$(echo "$RELEVANT_STREAMS" | grep "^$COMMON_ROOT/" | awk '{print $1}')
+
+        REL_PATH=${COMMON_ROOT#//}
+        SAFE_NAME=${REL_PATH//\//-}
+        CLIENT_NAME="p4fusion-${SAFE_NAME}-${USER}"
+        REPO_PATH="${GIT_OUTPUT_ROOT}/${REL_PATH}"
+
+        echo "[INFO] Git Repo:    $REPO_PATH"
+
+        # Cleanup Old Repo
+        p4 client -d "$CLIENT_NAME" > /dev/null 2>&1
+        if [ -d "$REPO_PATH" ]; then
+            rm -rf "$REPO_PATH"
         fi
-        
-        echo "       - $REL_NAME  ->  $ALIAS"
-        
-        # Standard space-separated format: --branch value
-        BRANCH_ARGS+=( "--branch" "$REL_NAME:$ALIAS" )
-    done
+        mkdir -p "$REPO_PATH"
 
-    # Create Client Spec
-    cat <<EOF | p4 client -i > /dev/null
+        # Construct Branch Arguments
+        BRANCH_ARGS=()
+
+        echo "[INFO] Branches found:"
+        for STREAM in $FAMILY_STREAMS; do
+            REL_NAME=${STREAM#$COMMON_ROOT/}
+
+            if [ "$STREAM" == "$MAIN_STREAM" ]; then
+                ALIAS="main"
+            else
+                ALIAS=${REL_NAME//\//-}
+            fi
+
+            echo "       - $REL_NAME  ->  $ALIAS"
+
+            # Standard space-separated format: --branch value
+            BRANCH_ARGS+=( "--branch" "$REL_NAME:$ALIAS" )
+        done
+
+        # Create Client Spec
+        cat <<EOF | p4 client -i > /dev/null
 Client: $CLIENT_NAME
 Owner:  $P4USER
 Root:   $REPO_PATH
@@ -110,34 +138,35 @@ View:
     $COMMON_ROOT/... //$CLIENT_NAME/...
 EOF
 
-    # Turn debug back on for the critical p4-fusion command
-    set -x
+        # Turn debug back on for the critical p4-fusion command
+        set -x
 
-    # Run p4-fusion
-    "$P4_FUSION_BIN" \
-        --path "$COMMON_ROOT/..." \
-        "${BRANCH_ARGS[@]}" \
-        --user "$P4USER" \
-        --port "$P4PORT" \
-        --client "$CLIENT_NAME" \
-        --src "$REPO_PATH" \
-        --networkThreads 8 \
-        --printBatch 100 \
-        --lookAhead 2000 \
-        --retries 20 \
-        --refresh 1000 \
-        --noColor
+        # Run p4-fusion
+        "$P4_FUSION_BIN" \
+            --path "$COMMON_ROOT/..." \
+            "${BRANCH_ARGS[@]}" \
+            --user "$P4USER" \
+            --port "$P4PORT" \
+            --client "$CLIENT_NAME" \
+            --src "$REPO_PATH" \
+            --networkThreads 8 \
+            --printBatch 100 \
+            --lookAhead 2000 \
+            --retries 20 \
+            --refresh 1000 \
+            --noColor
 
-    # Turn off debug
-    set +x
+        # Turn off debug
+        set +x
 
-    # Cleanup
-    p4 client -d "$CLIENT_NAME" > /dev/null 2>&1
+        # Cleanup
+        p4 client -d "$CLIENT_NAME" > /dev/null 2>&1
 
-    # Store stats
-    DURATION=$((SECONDS - STREAM_START))
-    STATS_LOG+=("$SAFE_NAME: ${DURATION}s")
+        # Store stats
+        DURATION=$((SECONDS - STREAM_START))
+        STATS_LOG+=("$SAFE_NAME (root idx $i): ${DURATION}s")
 
+    done
 done
 
 echo "----------------------------------------------------------------"
