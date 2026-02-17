@@ -4,18 +4,18 @@
 #  CONFIGURATION
 # ==============================================================================
 
-P4USER="jpalenchar"
-P4PORT="10.2.2.71:61234"
+P4USER="UserName"
+P4PORT="Port"
 P4_FUSION_BIN="./build/p4-fusion/p4-fusion"
 
 # SEARCH_ROOTS and GIT_OUTPUT_ROOTS must match by index
 SEARCH_ROOTS=(
-  "//Components/CommandsSearcher"
+  "//Components/AnotherProject"
   "//Components/AnotherProject"
 )
 
 GIT_OUTPUT_ROOTS=(
-  "$(eval echo ~/CommandsSearcher_Repos)"
+  "$(eval echo ~/AnotherProject_Repos)"
   "$(eval echo ~/AnotherProject_Repos)"
 )
 
